@@ -44,7 +44,7 @@ image_ext_regex="\.JPG$|\.JPEG$|\.jpg$|\.jpeg$"
 video_ext_regex="\.MOV$|\.mov$|\.AVI$|\.avi$|\.3GP$|\.3gp$|\.mp4$|\.MP4$"
 
 target_image_size=2048
-
+backup_album_id="1000000490763976"
 ###
 
 #http://stackoverflow.com/questions/192249/how-do-i-parse-command-line-arguments-in-bash
@@ -151,6 +151,7 @@ function googleAuth() {
             -d client_secret=$client_secret \
             -d redirect_uri=urn:ietf:wg:oauth:2.0:oob \
             -d grant_type=authorization_code)
+
         access_token=$(echo -e "$auth_result" | \
                         grep -Po '"access_token" *: *.*?[^\\]",' | \
                         awk -F'"' '{ print $4 }')
@@ -162,6 +163,12 @@ function googleAuth() {
                     awk -F' ' '{ print $3 }' | awk -F',' '{ print $1}')
         time_now=`date +%s`
         expires_at=$((time_now + expires_in - 60))
+
+        if [ -z $access_token ] ; then
+            echo "OAuth failed :"
+            echo $auth_result
+        fi
+
         echo -e "access_token=$access_token\nrefresh_token=$refresh_token\nexpires_at=$expires_at" > $credential_file
     fi
 
@@ -199,7 +206,7 @@ function upload() {
     --header "Content-Type: image/jpg" \
     --header "Authorization: Bearer $access_token" \
     --header "Slug: $source_name" \
-    https://picasaweb.google.com/data/feed/api/user/$google_user_id/albumid/$google_album_id |
+    https://picasaweb.google.com/data/feed/api/user/$user_id/albumid/$backup_album_id |
     xmlstarlet format --indent-spaces 2 > "$db_file" 
 }
 export -f upload
