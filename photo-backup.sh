@@ -18,15 +18,21 @@ unlock() { lock u;} # drop a lock
 
 exlockNow || echoLockedAndExit
 
+sourceAndExport () {
+    source "$1"
+    export $(cut -d= -f1 "$1")
+}
+export -f sourceAndExport
+
 #config and credentials
-config_file=client.cfg
-credential_file=credential.cfg
+export config_file=client.cfg
+export credential_file=credential.cfg
 
 if [ ! -f $config_file ]; then
    echo "$config_file does not exist, please setup google project dance (see readme.md)"
    exit 1
 fi
-. $config_file
+sourceAndExport $config_file
 
 #temporary index folder
 index_dir="./index"
@@ -43,8 +49,9 @@ photo_resized_root="/mnt/nas/Data/Photos_Resized"
 image_ext_regex="\.JPG$|\.JPEG$|\.jpg$|\.jpeg$"
 video_ext_regex="\.MOV$|\.mov$|\.AVI$|\.avi$|\.3GP$|\.3gp$|\.mp4$|\.MP4$"
 
-target_image_size=2048
-backup_album_id="1000000490763976"
+export target_image_size=2048
+export backup_album_id="1000000490763976"
+
 ###
 
 #http://stackoverflow.com/questions/192249/how-do-i-parse-command-line-arguments-in-bash
@@ -54,7 +61,7 @@ do
 
     case $key in
         -i|--import)
-        import_dir="$2"
+        export import_dir="$2"
         if [ ! -d "$import_dir" ]; then
             echo "import directory($import_dir) does not exist"
             exit 1
@@ -65,6 +72,11 @@ do
         -v|--verbose)
         verbose_=yes
         echo "verbose($verbose_)"
+        ;;
+        -m|--mode)
+        export mode="$2"
+        echo "mode($mode)"
+        shift
         ;;
         *)
         echo "unknown option($1)"
@@ -124,18 +136,18 @@ function importFile() {
 }
 export -f importFile
 
+#copy the following from some stack overflow answer ...
 function googleAuth() {
     if [ -s $credential_file ]; then
         # if we already have a token stored, use it
-        source $credential_file
+        sourceAndExport $credential_file
         time_now=`date +%s`
     else
         scope="https://picasaweb.google.com/data/"
         # Form the request URL
-        # http://goo.gl/U0uKEb
         auth_url="https://accounts.google.com/o/oauth2/auth?client_id=$client_id&scope=$scope&response_type=code&redirect_uri=urn:ietf:wg:oauth:2.0:oob"
 
-        echo "Please go to:"
+        echo "please go to:"
         echo
         echo "$auth_url"
         echo
@@ -143,7 +155,6 @@ function googleAuth() {
         read auth_code
 
         # swap authorization code for access and refresh tokens
-        # http://goo.gl/Mu9E5J
         auth_result=$(curl -s https://accounts.google.com/o/oauth2/token \
             -H "Content-Type: application/x-www-form-urlencoded" \
             -d code=$auth_code \
@@ -165,15 +176,14 @@ function googleAuth() {
         expires_at=$((time_now + expires_in - 60))
 
         if [ -z $access_token ] ; then
-            echo "OAuth failed :"
-            echo $auth_result
+            echo "oauth failed: $auth_result"
+            exit 1
         fi
 
-        echo -e "access_token=$access_token\nrefresh_token=$refresh_token\nexpires_at=$expires_at" > $credential_file
+        echo -e "access_token=\"$access_token\"\nrefresh_token=\"$refresh_token\"\nexpires_at=$expires_at" > $credential_file
     fi
 
     # if our access token is expired, use the refresh token to get a new one
-    # http://goo.gl/71rN6V
     if [ $time_now -gt $expires_at ]; then
         refresh_result=$(curl -s https://accounts.google.com/o/oauth2/token \
         -H "Content-Type: application/x-www-form-urlencoded" \
@@ -189,7 +199,13 @@ function googleAuth() {
                     awk -F' ' '{ print $3 }' | awk -F',' '{ print $1 }')
         time_now=`date +%s`
         expires_at=$(($time_now + $expires_in - 60))
-        echo -e "access_token=$access_token\nrefresh_token=$refresh_token\nexpires_at=$expires_at" > $credential_file
+
+        if [ -z $access_token ] ; then
+            echo "refresh oauth failed: $refresh_result"
+            exit 1
+        fi
+
+        echo -e "access_token=\"$access_token\"\nrefresh_token=\"$refresh_token\"\nexpires_at=$expires_at" > $credential_file
     fi
 }
 export -f googleAuth
@@ -198,16 +214,19 @@ function upload() {
     googleAuth
     image_file="$1"
     source_name=$(basename "$image_file")
-    db_file="$image_file.xml"
-    if [ -f "$db_file" ] ; then     
-        echo "already upload($db_file)"
+    xml_file="$image_file.xml"
+    if [ -f "$xml_file" ] ; then     
+        echo "already upload($xml_file)"
     fi
     curl -s --request POST --data-binary "@$image_file" \
     --header "Content-Type: image/jpg" \
     --header "Authorization: Bearer $access_token" \
     --header "Slug: $source_name" \
-    https://picasaweb.google.com/data/feed/api/user/$user_id/albumid/$backup_album_id |
-    xmlstarlet format --indent-spaces 2 > "$db_file" 
+    https://picasaweb.google.com/data/feed/api/user/$user_id/albumid/$backup_album_id \
+    | xmlstarlet format --indent-spaces 2 > "$xml_file"
+
+    # do not keep xml response for file that are not properly uploaded
+    [ -s "$xml_file" ] || echo "fail to upload $image_file" && rm "$xml_file"
 }
 export -f upload
 
@@ -233,8 +252,26 @@ function uploadAll () {
 
     if [ -f "$upload_arguments" ] ; then 
         echo "uploading ..."
-        cat $upload_arguments | parallel --bar --eta upload
+        cat $upload_arguments | parallel -j4 --bar --eta upload
     fi
+}
+
+function listAlbums () {
+    echo "list albums"
+    albums_xml="$index_dir/albums.xml"
+    googleAuth
+
+    # this will get the user feed to list albums, convert it to pyx remove xmlns attribute then back to xml the indented
+    # see https://stackoverflow.com/questions/9025492/xmlstarlet-does-not-select-anything
+    curl -s --request GET \
+    --header "Authorization: Bearer $access_token" \
+    https://picasaweb.google.com/data/feed/api/user/$user_id \
+    | xmlstarlet pyx | grep -v "^Axmlns " | xmlstarlet p2x \
+    | xmlstarlet format --indent-spaces 2 > "$albums_xml"
+    
+    # this will get the album_id of the back-up album
+    backup_album_id=$(xmlstarlet sel -t -v '/feed/entry[gphoto:albumType="InstantUpload"]/gphoto:id/text()' "$albums_xml")
+    echo $backup_album_id
 }
 
 function importAll() {
@@ -300,7 +337,24 @@ function resizeAll() {
     fi
 }
 
-googleAuth
-importAll
-resizeAll
-uploadAll
+case "$mode" in
+    import)
+        importAll
+        ;;
+    resize)
+        resizeAll
+        ;;
+    upload)
+        uploadAll
+        ;;
+    albums)
+        listAlbums
+        ;;
+    *)
+        importAll
+        resizeAll
+        uploadAll
+        ;;
+esac
+
+exit 0
