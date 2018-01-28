@@ -226,7 +226,10 @@ function upload() {
     | xmlstarlet format --indent-spaces 2 > "$xml_file"
 
     # do not keep xml response for file that are not properly uploaded
-    [ -s "$xml_file" ] || echo "fail to upload $image_file" && rm "$xml_file"
+    if [[ ! -s "$xml_file" ]] ; then
+        echo "fail to upload $image_file" 
+        rm "$xml_file"
+    fi
 }
 export -f upload
 
@@ -234,23 +237,14 @@ export -f upload
 function uploadAll () {
     available_images="$index_dir/available_images"
     uploaded_images="$index_dir/uploaded_images"
-    upload_arguments="$index_dir/to_upload_images"
-
-    #all files
-    echo "extracting all available images ..."
+    upload_arguments="$index_dir/to_upload_arguments"
     find $photo_resized_root -type f | grep -E "$image_ext_regex" > $available_images
-    echo "images available : $(wc -l < $available_images)"
-
-    echo "extracting all uploaded images ..."
     find $photo_resized_root -type f | grep -E "\.xml$" | rev | cut -f 2- -d '.' | rev > $uploaded_images
-    echo "images uploaded : $(wc -l < $uploaded_images)"
-
-    echo "extracting difference ..."
     grep -Fxvf $uploaded_images $available_images | sort -rn > $upload_arguments
 
-    echo "images to upload : $(wc -l < $upload_arguments)"
+    echo "images available($(wc -l < $available_images)) uploaded($(wc -l < $uploaded_images)) => to upload($(wc -l < $upload_arguments))"
 
-    if [ -f "$upload_arguments" ] ; then 
+    if [ -s "$upload_arguments" ] ; then 
         echo "uploading ..."
         cat $upload_arguments | parallel -j4 --bar --eta upload
     fi
@@ -272,6 +266,14 @@ function listAlbums () {
     # this will get the album_id of the back-up album
     backup_album_id=$(xmlstarlet sel -t -v '/feed/entry[gphoto:albumType="InstantUpload"]/gphoto:id/text()' "$albums_xml")
     echo $backup_album_id
+}
+
+function downloadAlbum () {
+    album_id=$1
+    # imgmax=d --> full resolution photos link (contrary to 512px)
+    curl -s --request GET --header "Authorization: Bearer $access_token" \
+    https://picasaweb.google.com/data/feed/api/$user_id/118244284923290763976/$album_id/6386075959522531041?imgmax=d \
+    | xmlstarlet format --indent-spaces 2 > album.xml
 }
 
 function importAll() {
