@@ -24,6 +24,9 @@ sourceAndExport () {
 }
 export -f sourceAndExport
 
+export target_image_size=2048
+export backup_album_id="1000000490763976" #default back-up albumid
+
 #config and credentials
 export config_file=client.cfg
 export credential_file=credential.cfg
@@ -35,7 +38,7 @@ fi
 sourceAndExport $config_file
 
 #temporary index folder
-index_dir="./index"
+export index_dir="./index"
 mkdir -p $index_dir
 rm $index_dir/*
 
@@ -46,12 +49,10 @@ photo_root="/mnt/nas/Data/Photos"
 video_root="/mnt/nas/Data/Videos"
 photo_resized_root="/mnt/nas/Data/Photos_Resized"
 
+album_root="./albums"
+
 image_ext_regex="\.JPG$|\.JPEG$|\.jpg$|\.jpeg$"
 video_ext_regex="\.MOV$|\.mov$|\.AVI$|\.avi$|\.3GP$|\.3gp$|\.mp4$|\.MP4$"
-
-export target_image_size=2048
-export backup_album_id="1000000490763976"
-
 ###
 
 #http://stackoverflow.com/questions/192249/how-do-i-parse-command-line-arguments-in-bash
@@ -251,7 +252,7 @@ function uploadAll () {
 }
 
 function listAlbums () {
-    echo "list albums"
+    echo "listing albums"
     albums_xml="$index_dir/albums.xml"
     googleAuth
 
@@ -262,18 +263,79 @@ function listAlbums () {
     https://picasaweb.google.com/data/feed/api/user/$user_id \
     | xmlstarlet pyx | grep -v "^Axmlns " | xmlstarlet p2x \
     | xmlstarlet format --indent-spaces 2 > "$albums_xml"
-    
+
+    #count albums
+    num_albums=$(xmlstarlet sel -t -v "count(//entry)" "$albums_xml")
+
+}
+
+function findBackupAlbum () {
+    echo "finding backup album"
+    albums_xml="$index_dir/albums.xml"
+    if [ ! -f $albums_xml ]; then
+        echo "$albums_xml does not exist,  run album listing first"
+        exit 1
+    fi
+
     # this will get the album_id of the back-up album
     backup_album_id=$(xmlstarlet sel -t -v '/feed/entry[gphoto:albumType="InstantUpload"]/gphoto:id/text()' "$albums_xml")
-    echo $backup_album_id
+
+    echo "backup_album_id($backup_album_id) => $config_file"
+
+    sed -i '/^backup_album_id=/d' "$config_file"
+    echo -e "\nbackup_album_id=\"$backup_album_id\"" >> "$config_file"
+    sed -i '/^\s*$/d' "$config_file"
 }
 
 function downloadAlbum () {
     album_id=$1
+    album_xml="$index_dir/album-$1.xml"
+
     # imgmax=d --> full resolution photos link (contrary to 512px)
     curl -s --request GET --header "Authorization: Bearer $access_token" \
-    https://picasaweb.google.com/data/feed/api/$user_id/118244284923290763976/$album_id/6386075959522531041?imgmax=d \
-    | xmlstarlet format --indent-spaces 2 > album.xml
+    https://picasaweb.google.com/data/feed/api/user/$user_id/albumid/$album_id?imgmax=d \
+    | xmlstarlet pyx | grep -v "^Axmlns " | xmlstarlet p2x \
+    | xmlstarlet format --indent-spaces 2 > "$album_xml"
+}
+export -f downloadAlbum
+
+function downloadImage () {
+    id=$1
+    title=$2
+    uri=$3
+    album_id=$(echo $id | cut -d/ -f 10)
+    image_id=$(echo $id | cut -d/ -f 12)
+
+    mkdir -p ./albums/$album_id
+    # quietly if not newer download to album directory
+    wget -P ./albums/$album_id -q -N $uri
+}
+export -f downloadImage
+
+function downloadAllAlbum () {
+    albums_xml="$index_dir/albums.xml"
+    if [ ! -f $albums_xml ] ; then echo "$albums_xml does not exist" && exit 1 ; fi
+
+    albums_arguments="$index_dir/dl_albums_arguments"
+    images_arguments="$index_dir/dl_images_arguments"
+
+    # extract album list
+    #TODO expose album title filtering
+    xmlstarlet sel -t -m "//entry" -v "gphoto:id" -o ";" -v "title" -o ";" -v "gphoto:numphotos" -n "$albums_xml" \
+    | grep -v "Hangout" | grep "&amp;" > "$albums_arguments"
+
+    if [ -f "$albums_arguments" ] ; then
+        # download album meta data (xml)
+        echo "retreiving $(wc -l < $albums_arguments) albums info ..."
+        cat $albums_arguments | parallel -j4 --bar --eta --colsep ';' downloadAlbum {1}
+
+        # extract all photo id|title|uri belonging to albums
+        find "$index_dir" -type f -name "album-*" \
+        | xargs xmlstarlet sel -t -m "//entry" -v "id" -o ";" -v "title" -o ";" -v "content/@src" -n \
+        | grep -E "$image_ext_regex" | grep -v "ANIMATION" | grep -v "COLLAGE" >> "$images_arguments"
+        echo "downloading $(wc -l < $images_arguments) images ..."
+        cat $images_arguments | parallel -j4 --eta --bar --colsep ';' downloadImage {1} {2} {3}
+    fi
 }
 
 function importAll() {
@@ -349,8 +411,16 @@ case "$mode" in
     upload)
         uploadAll
         ;;
-    albums)
+    list-albums)
         listAlbums
+        ;;
+    find-backup-album)
+        listAlbums
+        findBackupAlbum
+        ;;
+    pull-albums)
+        listAlbums
+        downloadAllAlbum
         ;;
     *)
         importAll
