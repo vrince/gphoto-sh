@@ -157,22 +157,12 @@ function googleAuth() {
 
         # swap authorization code for access and refresh tokens
         auth_result=$(curl -s https://accounts.google.com/o/oauth2/token \
-            -H "Content-Type: application/x-www-form-urlencoded" \
-            -d code=$auth_code \
-            -d client_id=$client_id \
-            -d client_secret=$client_secret \
-            -d redirect_uri=urn:ietf:wg:oauth:2.0:oob \
-            -d grant_type=authorization_code)
+            -H "Content-Type: application/x-www-form-urlencoded" -d code=$auth_code -d client_id=$client_id -d client_secret=$client_secret \
+            -d redirect_uri=urn:ietf:wg:oauth:2.0:oob -d grant_type=authorization_code)
 
-        access_token=$(echo -e "$auth_result" | \
-                        grep -Po '"access_token" *: *.*?[^\\]",' | \
-                        awk -F'"' '{ print $4 }')
-        refresh_token=$(echo -e "$auth_result" | \
-                        grep -Po '"refresh_token" *: *.*?[^\\]",*' | \
-                        awk -F'"' '{ print $4 }')
-        expires_in=$(echo -e "$auth_result" | \
-                    grep -Po '"expires_in" *: *.*' | \
-                    awk -F' ' '{ print $3 }' | awk -F',' '{ print $1}')
+        access_token=$(echo -e "$auth_result" | grep -Po '"access_token" *: *.*?[^\\]",' | awk -F'"' '{ print $4 }')
+        refresh_token=$(echo -e "$auth_result" | grep -Po '"refresh_token" *: *.*?[^\\]",*' | awk -F'"' '{ print $4 }')
+        expires_in=$(echo -e "$auth_result" | grep -Po '"expires_in" *: *.*' | awk -F' ' '{ print $3 }' | awk -F',' '{ print $1}')
         time_now=`date +%s`
         expires_at=$((time_now + expires_in - 60))
 
@@ -187,17 +177,10 @@ function googleAuth() {
     # if our access token is expired, use the refresh token to get a new one
     if [ $time_now -gt $expires_at ]; then
         refresh_result=$(curl -s https://accounts.google.com/o/oauth2/token \
-        -H "Content-Type: application/x-www-form-urlencoded" \
-        -d refresh_token=$refresh_token \
-        -d client_id=$client_id \
-        -d client_secret=$client_secret \
-        -d grant_type=refresh_token)
-        access_token=$(echo -e "$refresh_result" | \
-                        grep -Po '"access_token" *: *.*?[^\\]",' | \
-                        awk -F'"' '{ print $4 }')
-        expires_in=$(echo -e "$refresh_result" | \
-                    grep -Po '"expires_in" *: *.*' | \
-                    awk -F' ' '{ print $3 }' | awk -F',' '{ print $1 }')
+        -H "Content-Type: application/x-www-form-urlencoded" -d refresh_token=$refresh_token -d client_id=$client_id \
+        -d client_secret=$client_secret -d grant_type=refresh_token)
+        access_token=$(echo -e "$refresh_result" | grep -Po '"access_token" *: *.*?[^\\]",' | awk -F'"' '{ print $4 }')
+        expires_in=$(echo -e "$refresh_result" | grep -Po '"expires_in" *: *.*' | awk -F' ' '{ print $3 }' | awk -F',' '{ print $1 }')
         time_now=`date +%s`
         expires_at=$(($time_now + $expires_in - 60))
 
@@ -224,6 +207,7 @@ function upload() {
     --header "Authorization: Bearer $access_token" \
     --header "Slug: $source_name" \
     https://picasaweb.google.com/data/feed/api/user/$user_id/albumid/$backup_album_id \
+    | xmlstarlet pyx | grep -v "^Axmlns " | xmlstarlet p2x \
     | xmlstarlet format --indent-spaces 2 > "$xml_file"
 
     # do not keep xml response for file that are not properly uploaded
@@ -292,8 +276,10 @@ function downloadAlbum () {
     album_xml="$index_dir/album-$1.xml"
 
     # imgmax=d --> full resolution photos link (contrary to 512px)
+    #https://picasaweb.google.com/data/feed/api/user/$user_id/albumid/$album_id?imgmax=d \
+    #?start-index=7000
     curl -s --request GET --header "Authorization: Bearer $access_token" \
-    https://picasaweb.google.com/data/feed/api/user/$user_id/albumid/$album_id?imgmax=d \
+    https://picasaweb.google.com/data/feed/api/user/$user_id/albumid/$album_id \
     | xmlstarlet pyx | grep -v "^Axmlns " | xmlstarlet p2x \
     | xmlstarlet format --indent-spaces 2 > "$album_xml"
 }
@@ -301,18 +287,20 @@ export -f downloadAlbum
 
 function downloadImage () {
     id=$1
-    title=$2
-    uri=$3
+    uri=$2
+    timestamp=$(date -d@${3::-3} --iso=seconds) #remove last 3 char the ts --> date
+    published=$(date -d$4 --iso=seconds)
+    name=$5
     album_id=$(echo $id | cut -d/ -f 10)
     image_id=$(echo $id | cut -d/ -f 12)
-
-    mkdir -p ./albums/$album_id
+    mkdir -p ./albums
     # quietly if not newer download to album directory
-    wget -P ./albums/$album_id -q -N $uri
+    wget -O ./albums/$published-$timestamp-$album_id-$image_id-$name -q -nc $uri
+    exit 1
 }
 export -f downloadImage
 
-function downloadAllAlbum () {
+function downloadAllAlbums () {
     albums_xml="$index_dir/albums.xml"
     if [ ! -f $albums_xml ] ; then echo "$albums_xml does not exist" && exit 1 ; fi
 
@@ -322,20 +310,52 @@ function downloadAllAlbum () {
     # extract album list
     #TODO expose album title filtering
     xmlstarlet sel -t -m "//entry" -v "gphoto:id" -o ";" -v "title" -o ";" -v "gphoto:numphotos" -n "$albums_xml" \
-    | grep -v "Hangout" | grep "&amp;" > "$albums_arguments"
+    | grep -v "Hangout" | grep "Bastien -" > "$albums_arguments"
 
     if [ -f "$albums_arguments" ] ; then
         # download album meta data (xml)
         echo "retreiving $(wc -l < $albums_arguments) albums info ..."
         cat $albums_arguments | parallel -j4 --bar --eta --colsep ';' downloadAlbum {1}
 
-        # extract all photo id|title|uri belonging to albums
+        # extract all photo id|title|ts|published|uri belonging to albums
+        # (title MUST be the last one for the image extension regex to work)
         find "$index_dir" -type f -name "album-*" \
-        | xargs xmlstarlet sel -t -m "//entry" -v "id" -o ";" -v "title" -o ";" -v "content/@src" -n \
+        | xargs xmlstarlet sel -t -m "//entry" -v "id" -o ";" -v "content/@src" -o ";" -v "gphoto:timestamp" -o ";" -v "published" -o ";" -v "title" -n \
         | grep -E "$image_ext_regex" | grep -v "ANIMATION" | grep -v "COLLAGE" >> "$images_arguments"
         echo "downloading $(wc -l < $images_arguments) images ..."
-        cat $images_arguments | parallel -j4 --eta --bar --colsep ';' downloadImage {1} {2} {3}
+        cat $images_arguments | parallel -j4 --eta --bar --colsep ';' downloadImage {1} {2} {3} {4} {5}
     fi
+}
+
+function patchXmlNamespace {
+    xml_file="$1"
+    if grep -q "<xml>fake" "${xml_file}" ; then 
+        echo "<xml>fake<\xml>" > $xml_file
+    else
+        cp "$xml_file" "${xml_file}_"
+        cat "${xml_file}_" | xmlstarlet pyx | grep -v "^Axmlns " | xmlstarlet p2x | xmlstarlet format --indent-spaces 2 > "$xml_file"
+    fi
+}
+export -f patchXmlNamespace
+
+function listAllUploadedPhotos {
+    # look into all google xml response we stored after every single upload
+    echo "listing all uploaded photos ..."
+
+    xml_files="$index_dir/xml_files"
+    images_arguments="$index_dir/ul_images_arguments"
+    
+    find "$photo_resized_root/2014" -type f -name "*.xml" > "$xml_files"
+    #cat $xml_files | parallel -j4 --eta --bar --colsep ';' patchXmlNamespace {1}
+
+    # extract all photo ever uploaded
+    cat "$xml_files" \
+    | xargs xmlstarlet sel -t -m "//entry" -v "id" -o ";" -v "media:group/media:content/@url" -o ";" -v "gphoto:timestamp" \
+    -o ";" -v "published" -o ";" -v "title" -n \
+    | grep -E "$image_ext_regex" | grep -v "ANIMATION" | grep -v "COLLAGE" >> "$images_arguments"
+
+    echo "downloading $(wc -l < $images_arguments) images ..."
+    cat $images_arguments | parallel -j8 --eta --bar --colsep ';' downloadImage {1} {2} {3} {4} {5}
 }
 
 function importAll() {
@@ -344,6 +364,7 @@ function importAll() {
     images_to_import="$index_dir/images_to_import"
     videos_to_import="$index_dir/videos_to_import"
 
+    #TODO make import argument an array/list and iterate on it
     if [ -n "$import_dir" ] ; then 
         find $import_dir -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "$image_ext_regex" > $images_to_import
         find $import_dir -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "$video_ext_regex" > $videos_to_import
@@ -420,9 +441,13 @@ case "$mode" in
         ;;
     pull-albums)
         listAlbums
-        downloadAllAlbum
+        downloadAllAlbums
         ;;
-    *)
+    pull-all)
+        listAlbums
+        listAllUploadedPhotos
+        ;;
+    push)
         importAll
         resizeAll
         uploadAll

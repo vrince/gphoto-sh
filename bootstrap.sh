@@ -14,4 +14,4 @@ popd
 popd
 
 # dependencies
-sudo apt install imagemagick exif xmlstarlet
+sudo apt install --no-install-recommends imagemagick libimage-exiftool-perl xmlstarlet curl
