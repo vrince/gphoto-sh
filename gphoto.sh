@@ -79,6 +79,10 @@ do
         echo "mode($mode)"
         shift
         ;;
+        -s|--skip-no-import)
+        export skip_no_import=yes
+        echo "skip_no_import($skip_no_import)"
+        ;;
         *)
         echo "unknown option($1)"
         exit 1
@@ -373,8 +377,14 @@ function importAll() {
     find $nas_import_dir -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "$image_ext_regex" >> $images_to_import
     find $nas_import_dir -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "$video_ext_regex" >> $videos_to_import
 
-    echo "images to import : $(wc -l < $images_to_import)"
-    echo "videos to import : $(wc -l < $videos_to_import)"
+    image_count=$(wc -l < $images_to_import)
+    video_count=$(wc -l < $videos_to_import)
+    echo "image / video to import --> $image_count / $video_count"
+
+    if [ -n "$skip_no_import" ] && (( $image_count == 0 )) && (( $video_count == 0 )) ; then
+        echo "nothing to import"
+        exit 0
+    fi
 
     import_arguments="$index_dir/import_arguments"
 
