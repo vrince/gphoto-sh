@@ -21,13 +21,11 @@ This scheme should avoid a lot of name conficts if using many devices but there 
 * Create a client OAuth2 named `gphoto-sh` for example
 * Create a config file named `client.cfg` and populate it with :
   * Your `client_id` and `client_secret` from the client oauth page
-  * Your `user_id`, go to https://get.google.com/albumarchive you'll be redirect to https://get.google.com/albumarchive/<user_id>
 
 ```bash
 # ./client.cfg
 client_id="xxxxxxxx-xxxxxxxxxxxxxxxxxxxx.apps.googleusercontent.com"
-client_secret="xxxxxxxxxxx-xxxxxxxxxxxxxx" 
-user_id="123456789132456798123"
+client_secret="xxxxxxxxxxx-xxxxxxxxxxxxxx"
 ```
 
 ### Setup root paths
@@ -48,7 +46,6 @@ To install dependencies run `./bootstrap.sh` but before take a look inside, it w
 * download and install [parallel](https://www.gnu.org/software/parallel/).
 * install `imagemagic` for the resize tool
 * install `exiftool` to read image exif tags (`CreationDate`)
-* install `xmlstarlet` to read/fix/format xml files
 
 ### Run
 
@@ -56,6 +53,21 @@ To install dependencies run `./bootstrap.sh` but before take a look inside, it w
 
 > During the first run a credential file will be created, follow link, login into you google account, and copy/paste code in the terminal, finally hit enter.
 
+
+### Service
+
+List all jobs
+
+```bash
+# list jobs
+atq
+
+# remove a job
+at -r <job-id>
+
+# all jobs content
+for job_id in $(atq | cut -f 1); do at -c "${job_id}"; done
+```
 
 ### Upload validation
 
