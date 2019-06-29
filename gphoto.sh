@@ -92,6 +92,20 @@ done
 
 ###
 
+function check() {
+    if ! which ${1} > /dev/null ; then
+        echo "'${1}' not found'"
+        exit 1
+    fi
+}
+
+function checkDependencies() {
+    check parallel
+    check mogrify
+    check exiftool
+    check curl
+}
+
 function resize() {
     destination="$3"
     path_file="$1"
@@ -320,8 +334,8 @@ export -f downloadImage
 function listUploadedItems () {
     #https://developers.google.com/photos/library/reference/rest/v1/mediaItems/list
     googleAuth
-    uploaded_items="${index_dir}/uploaded_items.json"
-    current_items="${index_dir}/current_items.json"
+    uploaded_items="uploaded_items.json"
+    current_items="current_items.json"
     items_count=0
 
     while true
@@ -412,6 +426,9 @@ function resizeAll() {
         cat ${resize_arguments} | parallel --bar --eta --colsep ':' resize {1} {2} {3}
     fi
 }
+
+date
+checkDependencies
 
 case "$mode" in
     auth)
