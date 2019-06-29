@@ -94,7 +94,7 @@ done
 
 function check() {
     if ! which ${1} > /dev/null ; then
-        echo "'${1}' not found'"
+        echo "'${1}' not found"
         exit 1
     fi
 }
