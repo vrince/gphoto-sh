@@ -395,6 +395,9 @@ function importAll() {
         echo "importing ..."
         cat ${import_arguments} | parallel --bar --eta --colsep ':' importFile {1} {2}
     fi
+
+    # remove empty directory left behind
+    find ${nas_import_dir} -depth -type d -empty -delete
 }
 
 function resizeAll() {
@@ -451,6 +454,10 @@ case "$mode" in
         ;;
     list-uploaded-items)
         listUploadedItems
+        ;;
+    no-push)
+        importAll
+        resizeAll
         ;;
     push)
         importAll
