@@ -24,7 +24,7 @@ sourceAndExport () {
 }
 export -f sourceAndExport
 
-export target_image_size=2048
+export target_image_size=3840 
 
 #config and credentials
 export config_file=client.cfg
@@ -48,6 +48,8 @@ photo_root="/mnt/nas/Data/Photos"
 video_root="/mnt/nas/Data/Videos"
 photo_resized_root="/mnt/nas/Data/Photos_Resized"
 
+sub_directory=$(date +"%Y")
+
 album_root="./albums"
 
 image_ext_regex="\.JPG$|\.JPEG$|\.jpg$|\.jpeg$"
@@ -68,6 +70,15 @@ do
         fi
         echo "import directory($import_dir)"
         shift
+        ;;
+        -s|--sub-directory)
+        export sub_directory="$2"
+        echo "sub directory($sub_directory)"
+        shift
+        ;;
+        -a|--all)
+        sub_directory=""
+        echo "all => no sub directory"
         ;;
         -v|--verbose)
         verbose_=yes
@@ -90,6 +101,10 @@ do
     shift # past argument or value
 done
 
+
+sub_directory="/"${sub_directory}
+echo "sub directory(${sub_directory})"
+
 ###
 
 function check() {
@@ -109,8 +124,11 @@ function checkDependencies() {
 function resize() {
     destination="$3"
     path_file="$1"
-    mogrify -path "${destination}" -filter Triangle -define filter:support=2 -resize $2x$2 -unsharp 0.25x0.08+8.3+0.045 \
-    -dither None -posterize 136 -quality 82 -define jpeg:fancy-upsampling=off -interlace none -colorspace sRGB "${path_file}" &> /dev/null
+    filename=$(basename -- "$path_file")
+    cp "${path_file}" "${destination}/"
+    #mogrify -path "${destination}" -filter Triangle -define filter:support=2 -resize $2x$2 -unsharp 0.25x0.08+8.3+0.045 \
+    #-dither None -posterize 136 -quality 82 -define jpeg:fancy-upsampling=off -interlace none -colorspace sRGB "${path_file}" &> /dev/null
+    imgp --res $2x$2 --optimize --mute --overwrite --quality 82 "${destination}/${filename}"
     resize_output=$?
     if [ ${resize_output} -ne 0 ]; then
         mv "${path_file}" "${path_file}_"
@@ -270,11 +288,14 @@ export -f upload
 
 ## Uploads
 function uploadAll () {
+
+    echo "extracting images list to upload ..."
+
     available_images="${index_dir}/available_images"
     uploaded_images="${index_dir}/uploaded_images"
     upload_arguments="${index_dir}/to_upload_arguments"
-    find ${photo_resized_root} -type f | grep -E "${image_ext_regex}" > ${available_images}
-    find ${photo_resized_root} -type f | grep -E "\.(xml|json)$" | rev | cut -f 2- -d '.' | rev > $uploaded_images
+    find ${photo_resized_root}${sub_directory} -type f | grep -E "${image_ext_regex}" > ${available_images}
+    find ${photo_resized_root}${sub_directory} -type f | grep -E "\.(xml|json)$" | rev | cut -f 2- -d '.' | rev > $uploaded_images
     grep -Fxvf ${uploaded_images} ${available_images} | sort -rn > ${upload_arguments}
 
     echo "images available($(wc -l < ${available_images})) uploaded($(wc -l < ${uploaded_images})) => to upload($(wc -l < $upload_arguments))"
@@ -407,8 +428,8 @@ function resizeAll() {
     images_index="${index_dir}/all_images"
     resized_images_index="${index_dir}/all_resized_images"
     images_to_resize="${index_dir}/images_to_resize"
-    find ${photo_root} -type f -printf '%P\n' | grep -E "${image_ext_regex}"  | grep -v "(2)." > ${images_index}
-    find ${photo_resized_root} -type f -printf '%P\n' | grep -E "${image_ext_regex}" > ${resized_images_index}
+    find ${photo_root}${sub_directory} -type f -printf '%P\n' | grep -E "${image_ext_regex}"  | grep -v "(2)." > ${images_index}
+    find ${photo_resized_root}${sub_directory} -type f -printf '%P\n' | grep -E "${image_ext_regex}" > ${resized_images_index}
     grep -Fxvf ${resized_images_index} ${images_index} | sort -rn | awk -v p_root="${photo_root}/" '{print p_root $0}' > ${images_to_resize}
 
     echo "images to resize : $(wc -l < ${images_to_resize})"
@@ -426,7 +447,7 @@ function resizeAll() {
     
     if [ -f "${resize_arguments}" ] ; then  
         echo "resizing ..."
-        cat ${resize_arguments} | parallel --bar --eta --colsep ':' resize {1} {2} {3}
+        cat ${resize_arguments} | parallel -j 4 --bar --eta --colsep ':' resize {1} {2} {3}
     fi
 }
 
