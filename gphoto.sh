@@ -48,8 +48,6 @@ photo_root="/mnt/nas/Data/Photos"
 video_root="/mnt/nas/Data/Videos"
 photo_resized_root="/mnt/nas/Data/Photos_Resized"
 
-sub_directory=$(date +"%Y")
-
 album_root="./albums"
 
 image_ext_regex="\.JPG$|\.JPEG$|\.jpg$|\.jpeg$"
@@ -70,15 +68,6 @@ do
         fi
         echo "import directory($import_dir)"
         shift
-        ;;
-        -s|--sub-directory)
-        export sub_directory="$2"
-        echo "sub directory($sub_directory)"
-        shift
-        ;;
-        -a|--all)
-        sub_directory=""
-        echo "all => no sub directory"
         ;;
         -v|--verbose)
         verbose_=yes
@@ -101,9 +90,9 @@ do
     shift # past argument or value
 done
 
-
-sub_directory="/"${sub_directory}
-echo "sub directory(${sub_directory})"
+photo_root=${photo_root}
+video_root=${video_root}
+photo_resized_root=${photo_resized_root}
 
 ###
 
@@ -147,18 +136,18 @@ function originalDate() {
 export -f originalDate
 
 function importFile() {
-    image_file=$1
-    dest_root=$2
+    local image_file=$1
+    local dest_root=$2
 
-    source_dir=$(dirname "$image_file")
-    source_name=$(basename "$image_file")
+    local source_dir=$(dirname "$image_file")
+    local source_name=$(basename "$image_file")
 
     #extract date firt from exif orginal date
-    original_date=$(originalDate "$image_file")
+    local original_date=$(originalDate "$image_file")
 
-    dest_dir="$dest_root/$original_date"
-    dest_name=$(echo $source_name | tr " " "_")
-    dest_file="$dest_dir/$dest_name"
+    local dest_dir="$dest_root/$original_date"
+    local dest_name=$(echo $source_name | tr " " "_")
+    local dest_file="$dest_dir/$dest_name"
 
     mkdir -p "$dest_dir"
 
@@ -171,6 +160,54 @@ function importFile() {
     fi
 }
 export -f importFile
+
+
+function importResizeUploadFile() {
+    local image_file=$1
+    local dest_root=$2
+    local resized_dest_root=$3
+
+    if [ -z "${resized_dest_root}" ] ; then
+        importFile "${image_file}" "${dest_root}"
+        return
+    fi
+
+    local source_dir=$(dirname "$image_file")
+    local source_name=$(basename "$image_file")
+
+    #extract date firt from exif orginal date
+    local original_date=$(originalDate "$image_file")
+
+    local dest_dir="$dest_root/$original_date"
+    local dest_name=$(echo $source_name | tr " " "_")
+    local dest_file="$dest_dir/$dest_name"
+
+    local resized_dest_dir="$resized_dest_root/$original_date"
+    local resized_dest_file="$resized_dest_dir/$dest_name"
+
+    local json_file="$resized_dest_file.json"
+
+    mkdir -p "$dest_dir"
+    mkdir -p "$resized_dest_dir"
+
+    # already done skip
+    if [ -f "$json_file" ] ; then
+        rm "$image_file"
+        return
+    fi
+
+    cp "$image_file" "$dest_file"
+    resize "$dest_file" $target_image_size "$resized_dest_dir"
+    upload "$resized_dest_file"
+
+    # stupid rate limiter to avoid hitting google WritePerMinute
+    sleep 20
+
+    if [ -f "$json_file" ] ; then
+        rm "$image_file"
+    fi
+}
+export -f importResizeUploadFile
 
 #copy the following from some stack overflow answer ...
 function googleAuth() {
@@ -241,10 +278,10 @@ function resetGoogleAuth() {
 
 function upload() {
     googleAuth
-    image_file="$1"
-    source_name=$(basename "$image_file")
-    xml_file="$image_file.xml"
-    json_file="$image_file.json"
+    local image_file="$1"
+    local source_name=$(basename "$image_file")
+    local xml_file="$image_file.xml"
+    local json_file="$image_file.json"
 
     if [ -f "$xml_file" ] ; then     
         echo "already upload($xml_file)"
@@ -270,10 +307,6 @@ function upload() {
     --data '{"newMediaItems": [{"description": "'"${source_name}"'", "simpleMediaItem": {"uploadToken": "'"${upload_token}"'"}}]}' \
     https://photoslibrary.googleapis.com/v1/mediaItems:batchCreate > "${json_file}"
 
-    #FIXME (send batch to avoid gettin gquota limit)
-    #for now sleeping a little bit to avoid ... 'photoslibrary.googleapis.com/write_requests' and limit 'WritesPerMinutePerUser' 
-    sleep 1
-
     # do not keep response for file that are not properly uploaded
     if [[ ! -s "${json_file}" ]] ; then
         echo "fail to upload ${image_file} (empty)" 
@@ -291,23 +324,23 @@ function uploadAll () {
 
     echo "extracting images list to upload ..."
 
-    available_images="${index_dir}/available_images"
-    uploaded_images="${index_dir}/uploaded_images"
-    upload_arguments="${index_dir}/to_upload_arguments"
-    find ${photo_resized_root}${sub_directory} -type f | grep -E "${image_ext_regex}" > ${available_images}
-    find ${photo_resized_root}${sub_directory} -type f | grep -E "\.(xml|json)$" | rev | cut -f 2- -d '.' | rev > $uploaded_images
+    local available_images="${index_dir}/available_images"
+    local uploaded_images="${index_dir}/uploaded_images"
+    local upload_arguments="${index_dir}/to_upload_arguments"
+    find ${photo_resized_root} -type f | grep -E "${image_ext_regex}" > ${available_images}
+    find ${photo_resized_root} -type f | grep -E "\.(xml|json)$" | rev | cut -f 2- -d '.' | rev > $uploaded_images
     grep -Fxvf ${uploaded_images} ${available_images} | sort -rn > ${upload_arguments}
 
     echo "images available($(wc -l < ${available_images})) uploaded($(wc -l < ${uploaded_images})) => to upload($(wc -l < $upload_arguments))"
 
     if [ -s "${upload_arguments}" ] ; then 
         echo "uploading ..."
-        cat ${upload_arguments} | parallel -j1 --bar --eta upload
+        cat ${upload_arguments} | parallel -j1 --bar --delay 10 --eta upload
     fi
 }
 
 function findUploadErrors () {
-    uploaded_errors="${index_dir}/uploaded_errors"
+    local uploaded_errors="${index_dir}/uploaded_errors"
     find ${photo_resized_root} -name "*.json" | xargs grep -E 'error' -l > ${uploaded_errors}
     echo "upload errors($(wc -l < ${uploaded_errors}))"
     echo "to remove \"cat ${uploaded_errors} | xargs rm\""
@@ -315,7 +348,7 @@ function findUploadErrors () {
 
 function listAlbums () {
     echo "listing albums"
-    albums_json="${index_dir}/albums.json"
+    local albums_json="${index_dir}/albums.json"
     googleAuth
 
     curl -s --request GET \
@@ -327,8 +360,8 @@ function listAlbums () {
 }
 
 function downloadAlbum () {
-    album_id=${1}
-    album_json="$index_dir/album-${1}.json"
+    local album_id=${1}
+    local album_json="$index_dir/album-${1}.json"
     googleAuth
 
     curl -s --request GET \
@@ -381,8 +414,8 @@ function listUploadedItems () {
 function importAll() {
     #find all files
 
-    images_to_import="${index_dir}/images_to_import"
-    videos_to_import="${index_dir}/videos_to_import"
+    local images_to_import="${index_dir}/images_to_import"
+    local videos_to_import="${index_dir}/videos_to_import"
 
     #TODO make import argument an array/list and iterate on it
     if [ -n "${import_dir}" ] ; then 
@@ -405,36 +438,48 @@ function importAll() {
     import_arguments="${index_dir}/import_arguments"
 
     while IFS='' read -r image_file || [[ -n "${image_file}" ]]; do
-        echo "${image_file}:${photo_root}" >> ${import_arguments}
+        echo "${image_file}:${photo_root}:${photo_resized_root}" >> ${import_arguments}
     done < "${images_to_import}"
 
     while IFS='' read -r video_file || [[ -n "${video_file}" ]]; do
         echo "${video_file}:${video_root}" >> ${import_arguments}
     done < "${videos_to_import}"
 
-    if [ -f "${import_arguments}" ] ; then  
-        echo "importing ..."
-        cat ${import_arguments} | parallel --bar --eta --colsep ':' importFile {1} {2}
+
+
+    if [ -f "${import_arguments}" ] ; then
+        if [[ "${mode}" == "push" ]] ; then
+            echo "importing / resizing / uploading (delay 10 sec)..."
+            # stupid 10 sec delay to avoid hitting write limit of google
+            cat ${import_arguments} | parallel --bar --eta --delay 10 --colsep ':' importResizeUploadFile {1} {2} {3}
+        else
+            echo "importing ..."
+            cat ${import_arguments} | parallel --bar --eta --colsep ':' importFile {1} {2}
+        fi
     fi
 
     # remove empty directory left behind
     find ${nas_import_dir} -depth -type d -empty -delete
 }
 
+function resizeAndUploadOnlyImported() {
+    echo "rezise & upload (only imported)..."
+}
+
 function resizeAll() {
 
     echo "extracting images list to resize ..."
 
-    images_index="${index_dir}/all_images"
-    resized_images_index="${index_dir}/all_resized_images"
-    images_to_resize="${index_dir}/images_to_resize"
-    find ${photo_root}${sub_directory} -type f -printf '%P\n' | grep -E "${image_ext_regex}"  | grep -v "(2)." > ${images_index}
-    find ${photo_resized_root}${sub_directory} -type f -printf '%P\n' | grep -E "${image_ext_regex}" > ${resized_images_index}
+    local images_index="${index_dir}/all_images"
+    local resized_images_index="${index_dir}/all_resized_images"
+    local images_to_resize="${index_dir}/images_to_resize"
+    find ${photo_root} -type f -printf '%P\n' | grep -E "${image_ext_regex}"  | grep -v "(2)." > ${images_index}
+    find ${photo_resized_root} -type f -printf '%P\n' | grep -E "${image_ext_regex}" > ${resized_images_index}
     grep -Fxvf ${resized_images_index} ${images_index} | sort -rn | awk -v p_root="${photo_root}/" '{print p_root $0}' > ${images_to_resize}
 
     echo "images to resize : $(wc -l < ${images_to_resize})"
 
-    resize_arguments="${index_dir}/resize_arguments"
+    local resize_arguments="${index_dir}/resize_arguments"
 
     while IFS='' read -r image_file || [[ -n "${image_file}" ]]; do
         source_dir=$(dirname "${image_file}")
@@ -476,11 +521,10 @@ case "$mode" in
     list-uploaded-items)
         listUploadedItems
         ;;
-    no-push)
-        importAll
-        resizeAll
-        ;;
     push)
+        importAll
+        ;;
+    sync-all)
         importAll
         resizeAll
         uploadAll
@@ -490,4 +534,5 @@ case "$mode" in
         exit 1
 esac
 
+echo "done!!"
 exit 0
