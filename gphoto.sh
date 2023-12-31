@@ -42,7 +42,6 @@ mkdir -p $index_dir
 rm $index_dir/*
 
 #TODO add config for path
-nas_import_dir="/mnt/nas/Uploads"
 import_dir=""
 photo_root="/mnt/nas/Data/Photos"
 video_root="/mnt/nas/Data/Videos"
@@ -423,9 +422,6 @@ function importAll() {
         find ${import_dir} -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "${video_ext_regex}" > ${videos_to_import}
     fi
 
-    find ${nas_import_dir} -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "${image_ext_regex}" >> ${images_to_import}
-    find ${nas_import_dir} -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "${video_ext_regex}" >> ${videos_to_import}
-
     image_count=$(wc -l < ${images_to_import})
     video_count=$(wc -l < ${videos_to_import})
     echo "image / video to import --> ${image_count} / ${video_count}"
@@ -457,9 +453,6 @@ function importAll() {
             cat ${import_arguments} | parallel --bar --eta --colsep ':' importFile {1} {2}
         fi
     fi
-
-    # remove empty directory left behind
-    find ${nas_import_dir} -depth -type d -empty -delete
 }
 
 function resizeAndUploadOnlyImported() {
