@@ -18,13 +18,11 @@ unlock() { lock u;} # drop a lock
 
 exlockNow || echoLockedAndExit
 
-sourceAndExport () {
+source_and_export () {
     source "$1"
     export $(cut -d= -f1 "$1")
 }
-export -f sourceAndExport
-
-export target_image_size=3840 
+export -f source_and_export
 
 #config and credentials
 export config_file=client.cfg
@@ -34,65 +32,17 @@ if [ ! -f $config_file ]; then
    echo "$config_file does not exist, please setup google project dance (see readme.md)"
    exit 1
 fi
-sourceAndExport $config_file
-
-#temporary index folder
-export index_dir="./index"
-mkdir -p $index_dir
-rm $index_dir/*
+source_and_export $config_file
 
 #TODO add config for path
-import_dir=""
-photo_root="/mnt/nas/Data/Photos"
-video_root="/mnt/nas/Data/Videos"
-photo_resized_root="/mnt/nas/Data/Photos_Resized"
+export target_image_size=3840 
+import_dir="/mnt/nas/Uploads"
+photo_root="/mnt/nas-2/Data/Photos"
+video_root="/mnt/nas-2/Data/Videos"
+photo_resized_root="/mnt/nas-2/Data/Photos_Resized"
 
-album_root="./albums"
-
-image_ext_regex="\.JPG$|\.JPEG$|\.jpg$|\.jpeg$"
+image_ext_regex="\.JPG$|\.JPEG$|\.jpg$|\.jpeg$|\.GIF$|\.gif$"
 video_ext_regex="\.MOV$|\.mov$|\.AVI$|\.avi$|\.3GP$|\.3gp$|\.mp4$|\.MP4$"
-###
-
-#http://stackoverflow.com/questions/192249/how-do-i-parse-command-line-arguments-in-bash
-while [[ $# -gt 0 ]]
-do
-    key="$1"
-
-    case $key in
-        -i|--import)
-        export import_dir="$2"
-        if [ ! -d "$import_dir" ]; then
-            echo "import directory($import_dir) does not exist"
-            exit 1
-        fi
-        echo "import directory($import_dir)"
-        shift
-        ;;
-        -v|--verbose)
-        verbose_=yes
-        echo "verbose($verbose_)"
-        ;;
-        -m|--mode)
-        export mode="$2"
-        echo "mode($mode)"
-        shift
-        ;;
-        -s|--skip-no-import)
-        export skip_no_import=yes
-        echo "skip_no_import($skip_no_import)"
-        ;;       
-        --)
-        shift
-        break
-        ;;
-    esac
-    shift # past argument or value
-done
-
-photo_root=${photo_root}
-video_root=${video_root}
-photo_resized_root=${photo_resized_root}
-
 ###
 
 function check() {
@@ -102,9 +52,9 @@ function check() {
     fi
 }
 
-function checkDependencies() {
+function check_dependencies() {
     check parallel
-    check mogrify
+    check imgp
     check exiftool
     check curl
 }
@@ -113,10 +63,17 @@ function resize() {
     destination="$3"
     path_file="$1"
     filename=$(basename -- "$path_file")
-    cp "${path_file}" "${destination}/"
-    #mogrify -path "${destination}" -filter Triangle -define filter:support=2 -resize $2x$2 -unsharp 0.25x0.08+8.3+0.045 \
-    #-dither None -posterize 136 -quality 82 -define jpeg:fancy-upsampling=off -interlace none -colorspace sRGB "${path_file}" &> /dev/null
-    imgp --res $2x$2 --optimize --mute --overwrite --quality 82 "${destination}/${filename}"
+    dest_file=${destination}/${filename}
+    cp "${path_file}" "${dest_file}"
+
+    # check if gif --> no resize just copy
+    if test -e ${dest_file} -a $(file -b --mime-type ${dest_file}) = "image/gif"; then
+        echo 'PNG file !'
+    else
+        echo "resizing ..."
+        imgp --res $2x$2 --optimize --mute --overwrite --quality 82 "${destination}/${filename}"
+    fi
+
     resize_output=$?
     if [ ${resize_output} -ne 0 ]; then
         mv "${path_file}" "${path_file}_"
@@ -124,17 +81,16 @@ function resize() {
 }
 export -f resize
 
-function originalDate() {
-    #original_date=$(identify -format '%[EXIF:*]' "$1" | grep "exif:DateTimeOriginal=" | cut -d"=" -f 2 | cut -d" " -f 1 | tr ":" "/")
+function extract_original_date() {
     original_date=$(exiftool "$1" | grep "^Create Date" | head -n 1 | cut -d":" -f 2- | cut -d" " -f 2 | tr ":" "/")
     if [ -z "$original_date" ] ; then
         original_date=$(stat -c %y "$1" | cut -d" " -f 1 | tr "-" "/")
     fi
     echo $original_date
 }
-export -f originalDate
+export -f extract_original_date
 
-function importFile() {
+function import() {
     local image_file=$1
     local dest_root=$2
 
@@ -142,7 +98,7 @@ function importFile() {
     local source_name=$(basename "$image_file")
 
     #extract date firt from exif orginal date
-    local original_date=$(originalDate "$image_file")
+    local original_date=$(extract_original_date "$image_file")
 
     local dest_dir="$dest_root/$original_date"
     local dest_name=$(echo $source_name | tr " " "_")
@@ -158,24 +114,19 @@ function importFile() {
         rm "$image_file"
     fi
 }
-export -f importFile
+export -f import
 
 
-function importResizeUploadFile() {
+function import_resize_upload() {
     local image_file=$1
     local dest_root=$2
     local resized_dest_root=$3
-
-    if [ -z "${resized_dest_root}" ] ; then
-        importFile "${image_file}" "${dest_root}"
-        return
-    fi
 
     local source_dir=$(dirname "$image_file")
     local source_name=$(basename "$image_file")
 
     #extract date firt from exif orginal date
-    local original_date=$(originalDate "$image_file")
+    local original_date=$(extract_original_date "$image_file")
 
     local dest_dir="$dest_root/$original_date"
     local dest_name=$(echo $source_name | tr " " "_")
@@ -187,15 +138,25 @@ function importResizeUploadFile() {
     local json_file="$resized_dest_file.json"
 
     mkdir -p "$dest_dir"
-    mkdir -p "$resized_dest_dir"
 
-    # already done skip
+    # check if already done --> skip
     if [ -f "$json_file" ] ; then
+        echo "💡 already imported"
         rm "$image_file"
         return
     fi
 
     cp "$image_file" "$dest_file"
+    
+    # chekc if no resized_dest_root --> we are done
+    if [ -z ${resized_dest_root} ] ; then
+        echo "💡 resized_dest_root"
+        rm "$image_file"
+        return
+    fi
+
+    mkdir -p "$resized_dest_dir"
+
     resize "$dest_file" $target_image_size "$resized_dest_dir"
     upload "$resized_dest_file"
 
@@ -206,13 +167,13 @@ function importResizeUploadFile() {
         rm "$image_file"
     fi
 }
-export -f importResizeUploadFile
+export -f import_resize_upload
 
 #copy the following from some stack overflow answer ...
-function googleAuth() {
+function google_auth() {
     if [ -s ${credential_file} ]; then
         # if we already have a token stored, use it
-        sourceAndExport ${credential_file}
+        source_and_export ${credential_file}
         time_now=`date +%s`
     else
         #scope="https://picasaweb.google.com/data/"
@@ -268,15 +229,10 @@ function googleAuth() {
         echo -e "expires_at=${expires_at}" >> ${credential_file}
     fi
 }
-export -f googleAuth
-
-function resetGoogleAuth() {
-    mv -f ${credential_file} ${credential_file}_bck
-    googleAuth
-}
+export -f google_auth
 
 function upload() {
-    googleAuth
+    google_auth
     local image_file="$1"
     local source_name=$(basename "$image_file")
     local xml_file="$image_file.xml"
@@ -291,7 +247,7 @@ function upload() {
         exit 0
     fi
 
-    upload_token_file="${index_dir}/upload_tokens"
+    upload_token_file=".upload_tokens"
     curl -s --request POST --data-binary "@${image_file}" \
     --header "Content-type: application/octet-stream" \
     --header "Authorization: Bearer ${access_token}" \
@@ -308,130 +264,39 @@ function upload() {
 
     # do not keep response for file that are not properly uploaded
     if [[ ! -s "${json_file}" ]] ; then
-        echo "fail to upload ${image_file} (empty)" 
+        echo "🚨 fail to upload ${image_file} (empty)" 
         rm "${json_file}"
     fi
     if grep -E 'error' "${json_file}" ; then
-        echo "fail to upload ${image_file} (contains error)" 
+        echo "🚨 fail to upload ${image_file} (contains error)" 
         mv "${json_file}" "${json_file}_error"
     fi
 }
 export -f upload
 
-## Uploads
-function uploadAll () {
-
-    echo "extracting images list to upload ..."
-
-    local available_images="${index_dir}/available_images"
-    local uploaded_images="${index_dir}/uploaded_images"
-    local upload_arguments="${index_dir}/to_upload_arguments"
-    find ${photo_resized_root} -type f | grep -E "${image_ext_regex}" > ${available_images}
-    find ${photo_resized_root} -type f | grep -E "\.(xml|json)$" | rev | cut -f 2- -d '.' | rev > $uploaded_images
-    grep -Fxvf ${uploaded_images} ${available_images} | sort -rn > ${upload_arguments}
-
-    echo "images available($(wc -l < ${available_images})) uploaded($(wc -l < ${uploaded_images})) => to upload($(wc -l < $upload_arguments))"
-
-    if [ -s "${upload_arguments}" ] ; then 
-        echo "uploading ..."
-        cat ${upload_arguments} | parallel -j1 --bar --delay 10 --eta upload
-    fi
-}
-
-function findUploadErrors () {
-    local uploaded_errors="${index_dir}/uploaded_errors"
-    find ${photo_resized_root} -name "*.json" | xargs grep -E 'error' -l > ${uploaded_errors}
-    echo "upload errors($(wc -l < ${uploaded_errors}))"
-    echo "to remove \"cat ${uploaded_errors} | xargs rm\""
-}
-
-function listAlbums () {
-    echo "listing albums"
-    local albums_json="${index_dir}/albums.json"
-    googleAuth
-
-    curl -s --request GET \
-    --header "Authorization: Bearer ${access_token}" \
-    https://photoslibrary.googleapis.com/v1/albums?pageSize=50 \
-    > "$albums_json"
-
-    #TODO get nextPageToken value until all albums are retreived
-}
-
-function downloadAlbum () {
-    local album_id=${1}
-    local album_json="$index_dir/album-${1}.json"
-    googleAuth
-
-    curl -s --request GET \
-    --header "Authorization: Bearer ${access_token}" \
-    https://photoslibrary.googleapis.com/v1/albums/${album_id} > "${album_json}"
-}
-export -f downloadAlbum
-
-function downloadImage () {
-    id=$1
-    uri=$2
-    timestamp=$(date -d@${3::-3} --iso=seconds) #remove last 3 char the ts --> date
-    published=$(date -d$4 --iso=seconds)
-    name=$5
-    album_id=$(echo $id | cut -d/ -f 10)
-    image_id=$(echo $id | cut -d/ -f 12)
-    mkdir -p ./albums
-    # quietly if not newer download to album directory
-    wget -O ./albums/$published-$timestamp-$album_id-$image_id-$name -q -nc $uri
-    exit 1
-}
-export -f downloadImage
-
-function listUploadedItems () {
-    #https://developers.google.com/photos/library/reference/rest/v1/mediaItems/list
-    googleAuth
-    uploaded_items="uploaded_items.json"
-    current_items="current_items.json"
-    items_count=0
-
-    while true
-    do
-        curl -s --request GET \
-        --header "Authorization: Bearer ${access_token}" \
-        "https://photoslibrary.googleapis.com/v1/mediaItems?pageSize=100&pageToken=${next_page_token}" > "${current_items}"
-
-        length=$(cat ${current_items} | jq '.mediaItems | length')
-        items_count=$((items_count + length))
-        next_page_token=$(cat ${current_items} | jq -r .nextPageToken)
-        cat ${current_items} | jq -r '.mediaItems | .[] | "\"\(.filename)\" \"\(.mimeType)\" \"\(.mediaMetadata.creationTime)\" \"\(.baseUrl)\""' >> ${uploaded_items}
-
-        echo -ne "uploaded item listed(${items_count})\r"
-
-        if [ -z ${next_page_token} ] ; then
-            break
-        fi
-    done
-}
-
-function importAll() {
+function import_all() {
     #find all files
 
-    local images_to_import="${index_dir}/images_to_import"
-    local videos_to_import="${index_dir}/videos_to_import"
+    local images_to_import=".images_to_import"
+    local videos_to_import=".videos_to_import"
 
-    #TODO make import argument an array/list and iterate on it
-    if [ -n "${import_dir}" ] ; then 
-        find ${import_dir} -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "${image_ext_regex}" > ${images_to_import}
-        find ${import_dir} -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "${video_ext_regex}" > ${videos_to_import}
-    fi
+    rm ${images_to_import}
+    rm ${videos_to_import}
+
+    find ${import_dir} -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "${image_ext_regex}" >> ${images_to_import}
+    find ${import_dir} -type f | grep -v '@Recycle' | grep -v '.Trash' | grep -E "${video_ext_regex}" >> ${videos_to_import}
 
     image_count=$(wc -l < ${images_to_import})
     video_count=$(wc -l < ${videos_to_import})
-    echo "image / video to import --> ${image_count} / ${video_count}"
+    echo "📸 image / 📹 video to import --> ${image_count} / ${video_count}"
 
     if [ -n "${skip_no_import}" ] && (( ${image_count} == 0 )) && (( ${video_count} == 0 )) ; then
         echo "nothing to import"
         exit 0
     fi
 
-    import_arguments="${index_dir}/import_arguments"
+    import_arguments=".import_arguments"
+    rm -f ${import_arguments}
 
     while IFS='' read -r image_file || [[ -n "${image_file}" ]]; do
         echo "${image_file}:${photo_root}:${photo_resized_root}" >> ${import_arguments}
@@ -442,90 +307,20 @@ function importAll() {
     done < "${videos_to_import}"
 
 
-
     if [ -f "${import_arguments}" ] ; then
-        if [[ "${mode}" == "push" ]] ; then
-            echo "importing / resizing / uploading (delay 10 sec)..."
-            # stupid 10 sec delay to avoid hitting write limit of google
-            cat ${import_arguments} | parallel --bar --eta --delay 10 --colsep ':' importResizeUploadFile {1} {2} {3}
-        else
-            echo "importing ..."
-            cat ${import_arguments} | parallel --bar --eta --colsep ':' importFile {1} {2}
-        fi
+        echo "importing / resizing / uploading ..."
+        cat ${import_arguments} | parallel --bar --eta --colsep ':' import_resize_upload {1} {2} {3}
     fi
+
+    # remove empty directory left behind
+    find ${import_dir} -depth -type d -empty -delete
 }
 
-function resizeAndUploadOnlyImported() {
-    echo "rezise & upload (only imported)..."
-}
-
-function resizeAll() {
-
-    echo "extracting images list to resize ..."
-
-    local images_index="${index_dir}/all_images"
-    local resized_images_index="${index_dir}/all_resized_images"
-    local images_to_resize="${index_dir}/images_to_resize"
-    find ${photo_root} -type f -printf '%P\n' | grep -E "${image_ext_regex}"  | grep -v "(2)." > ${images_index}
-    find ${photo_resized_root} -type f -printf '%P\n' | grep -E "${image_ext_regex}" > ${resized_images_index}
-    grep -Fxvf ${resized_images_index} ${images_index} | sort -rn | awk -v p_root="${photo_root}/" '{print p_root $0}' > ${images_to_resize}
-
-    echo "images to resize : $(wc -l < ${images_to_resize})"
-
-    local resize_arguments="${index_dir}/resize_arguments"
-
-    while IFS='' read -r image_file || [[ -n "${image_file}" ]]; do
-        source_dir=$(dirname "${image_file}")
-        relative_dir=${source_dir#$photo_root}
-        source_name=$(basename "${image_file}")
-        destination_dir="${photo_resized_root}${relative_dir}"
-        mkdir -p "${destination_dir}"
-        echo "${image_file}:${target_image_size}:${destination_dir}" >> ${resize_arguments}
-    done < "${images_to_resize}"
-    
-    if [ -f "${resize_arguments}" ] ; then  
-        echo "resizing ..."
-        cat ${resize_arguments} | parallel -j 4 --bar --eta --colsep ':' resize {1} {2} {3}
-    fi
-}
-
+# main sequence
 date
-checkDependencies
+check_dependencies
+google_auth
+import_all
 
-case "$mode" in
-    auth)
-        resetGoogleAuth
-        ;;
-    import)
-        importAll
-        ;;
-    resize)
-        resizeAll
-        ;;
-    upload)
-        uploadAll
-        ;;
-    upload-errors)
-        findUploadErrors
-        ;;
-    list-albums)
-        listAlbums
-        ;;
-    list-uploaded-items)
-        listUploadedItems
-        ;;
-    push)
-        importAll
-        ;;
-    sync-all)
-        importAll
-        resizeAll
-        uploadAll
-        ;;
-    *)
-        echo "unknow mode"
-        exit 1
-esac
-
-echo "done!!"
+echo "🎉 done"
 exit 0
